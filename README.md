@@ -1,2 +1,2 @@
 # CV-YOLO
-Basic computer vision / ose estimation using the YOLO267 models.
+Basic computer vision / pose estimation using the YOLO267 models.
