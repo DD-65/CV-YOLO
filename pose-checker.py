@@ -12,7 +12,7 @@ CONF_TH = 0.25
 EMA_ALPHA = 0.20
 CALIB_SECS = 4.0
 SLOUCH_RATIO = 0.78
-WARN_AFTER_SECS = 2.0
+WARN_AFTER_SECS = 1.5
 
 # Light rhythmic timing for alert sounds.
 CALIB_LOW_TIMES = [0.00, CALIB_SECS / 3.0, 2.0 * CALIB_SECS / 3.0]
@@ -82,6 +82,9 @@ class SoundPlayer:
             self.next_warn = now
 
     def play_calibration_done(self):
+        self._play("high")
+
+    def play_posture_ok(self):
         self._play("high")
 
     def update(self, now):
@@ -189,6 +192,7 @@ def main():
     calib_head = []
     calib_forward = []
     slouch_since = None
+    last_posture_bad = False
     t0 = time.time()
 
     try:
@@ -203,6 +207,7 @@ def main():
             color = (255, 255, 255)
             has_pose = False
             posture_bad = False
+            posture_ok = False
 
             if r.boxes is not None and len(r.boxes) > 0 and r.keypoints is not None:
                 boxes = r.boxes.xyxy.cpu().numpy()
@@ -265,11 +270,15 @@ def main():
                         else:
                             msg = "Posture OK"
                             color = (0, 200, 0)
+                            posture_ok = True
                 else:
                     msg = "Pose unclear (need nose + both shoulders)"
                     color = (0, 165, 255)
 
             now = time.time()
+            if last_posture_bad and posture_ok:
+                sound.play_posture_ok()
+            last_posture_bad = posture_bad
             if baseline_head is None and has_pose:
                 sound.set_mode("calibrating", now)
             elif posture_bad:
