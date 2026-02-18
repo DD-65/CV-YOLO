@@ -8,10 +8,15 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
+# Confidence cutoff for the keypoints we care about
 CONF_TH = 0.25
+# Smoothing strength for noisy frame-to-frame pose changes
 EMA_ALPHA = 0.20
+# First few seconds are used to learn your "upright" baseline
 CALIB_SECS = 4.0
+# If head height drops below this part of baseline, treat as slouching
 SLOUCH_RATIO = 0.78
+# Don't warn instantly; only warn if bad posture lasts this long
 WARN_AFTER_SECS = 1.5
 
 # Light rhythmic timing for alert sounds.
@@ -20,6 +25,7 @@ WARN_BEEP_SECS = 0.60
 
 
 def parse_args():
+    # CLI flags for quiet, GUI, or popup-only mode
     parser = argparse.ArgumentParser(description="Posture checker")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("-g", "--gui", action="store_true", help="show main camera GUI window")
@@ -41,6 +47,7 @@ def parse_args():
 class SoundPlayer:
     def __init__(self, silent=False):
         self.silent = silent
+        # On macOS we can play nicer system sounds through afplay
         self.is_macos = sys.platform == "darwin" and shutil.which("afplay") is not None
         self.low_sound = "/System/Library/Sounds/Pop.aiff"
         self.high_sound = "/System/Library/Sounds/Glass.aiff"
@@ -54,6 +61,7 @@ class SoundPlayer:
         if self.silent:
             return
         if self.is_macos:
+            # Pick a sound + volume based on event type
             if tone == "warn":
                 sound_file = self.warn_sound
                 vol = "0.24"
@@ -69,9 +77,11 @@ class SoundPlayer:
                 stderr=subprocess.DEVNULL,
             )
         else:
+            # Fallback bell character for non-mac systems
             print("\a", end="", flush=True)
 
     def set_mode(self, mode, now):
+        # Ignore mode changes if we're already in that state
         if mode == self.mode:
             return
         self.mode = mode
@@ -92,7 +102,7 @@ class SoundPlayer:
             return
         if self.mode == "warning":
             if now >= self.next_warn:
-                # Fixed rhythm without catch-up bursts if frame timing slips.
+                # Keep warning beeps steady even if frame timing jitters (Doesnt work :( )
                 self._play("warn")
                 self.next_warn = now + WARN_BEEP_SECS
             return
@@ -114,6 +124,7 @@ class PopupWarning:
         if not enabled:
             return
         try:
+            # Import lazily so popup is optional and doesn't break CLI-only use
             import tkinter as tk
 
             self.tk = tk
@@ -177,6 +188,7 @@ class PopupWarning:
 
 def main():
     args = parse_args()
+    # Load the pose model and webcam stream
     model = YOLO("yolo26s-pose.pt")
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -185,6 +197,7 @@ def main():
     sound = SoundPlayer(silent=args.silent)
     popup = PopupWarning(enabled=args.popup)
 
+    # Smoothed pose features and baseline stats
     ema_head = None
     ema_forward = None
     baseline_head = None
@@ -192,6 +205,7 @@ def main():
     calib_head = []
     calib_forward = []
     slouch_since = None
+    # Helps detect the "bad -> good" transition to use for confirmation sound
     last_posture_bad = False
     t0 = time.time()
 
@@ -210,6 +224,7 @@ def main():
             posture_ok = False
 
             if r.boxes is not None and len(r.boxes) > 0 and r.keypoints is not None:
+                # If there are multiple people, track the largest (-> closest) one in frame
                 boxes = r.boxes.xyxy.cpu().numpy()
                 areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
                 i = int(np.argmax(areas))
@@ -220,7 +235,7 @@ def main():
                 else:
                     kcf = np.ones(17, dtype=np.float32)
 
-                # COCO keypoints: nose=0, l_shoulder=5, r_shoulder=6.
+                # COCO keypoints needed: nose + both shoulders
                 need = [0, 5, 6]
                 if np.all(kcf[need] > CONF_TH):
                     has_pose = True
@@ -228,11 +243,12 @@ def main():
                     l_sh, r_sh = kxy[5], kxy[6]
 
                     neck = (l_sh + r_sh) / 2.0
+                    # Tiny epsilon avoids divide-by-zero on weird detections
                     shoulder_w = np.linalg.norm(l_sh - r_sh) + 1e-6
 
-                    # Larger head_height means head is held higher relative to shoulders.
+                    # Bigger value = head is higher above shoulders
                     head_height = (neck[1] - nose[1]) / shoulder_w
-                    # Larger forward_offset means head moved sideward/forward from shoulder center.
+                    # Bigger value = head drifting away from shoulder center
                     forward_offset = abs(nose[0] - neck[0]) / shoulder_w
 
                     if ema_head is None:
@@ -244,21 +260,25 @@ def main():
 
                     now = time.time()
                     if baseline_head is None:
+                        # During calibration, store stable smoothed values
                         calib_head.append(ema_head)
                         calib_forward.append(ema_forward)
                         msg = "Calibrating... sit upright"
                         color = (0, 255, 255)
+                        # Need both enough time and enough samples.
                         if (now - t0) >= CALIB_SECS and len(calib_head) >= 15:
                             baseline_head = float(np.median(calib_head))
                             baseline_forward = float(np.median(calib_forward))
                             sound.play_calibration_done()
                     else:
+                        # Slouch if head drops too much or drifts too far forward
                         slouch = (
                             ema_head < (SLOUCH_RATIO * baseline_head)
                             or ema_forward > (baseline_forward + 0.22)
                         )
                         if slouch:
                             if slouch_since is None:
+                                # Start a timer so short dips don't trigger warnings
                                 slouch_since = now
                         else:
                             slouch_since = None
@@ -276,9 +296,12 @@ def main():
                     color = (0, 165, 255)
 
             now = time.time()
+            # Play a quick "ok again" tone when posture recovers
             if last_posture_bad and posture_ok:
                 sound.play_posture_ok()
             last_posture_bad = posture_bad
+
+            # Keep sound mode aligned with current posture state
             if baseline_head is None and has_pose:
                 sound.set_mode("calibrating", now)
             elif posture_bad:
@@ -288,6 +311,7 @@ def main():
             sound.update(now)
 
             if args.popup:
+                # Popup should only stay visible while warning is active
                 if posture_bad:
                     popup.show()
                 else:
@@ -300,7 +324,7 @@ def main():
                     msg,
                     (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    1.1,  # slightly larger text than before
+                    1.1,  # bumped text size a bit so status is easier to read
                     color,
                     2,
                     cv2.LINE_AA,
