@@ -6,6 +6,7 @@ import time
 
 import cv2
 import numpy as np
+import torch
 from ultralytics import YOLO
 
 # Confidence cutoff for the keypoints we care about
@@ -41,7 +42,36 @@ def parse_args():
         action="store_true",
         help="disable all sounds (calibration + warning beeps)",
     )
+    parser.add_argument(
+        "--device",
+        default="auto",
+        help="inference device: auto, cpu, mps, cuda, cuda:0, etc.",
+    )
     return parser.parse_args()
+
+
+def resolve_device(requested):
+    req = requested.lower()
+
+    if req == "auto":
+        if torch.cuda.is_available():
+            return "cuda:0"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+    if req.startswith("cuda"):
+        if torch.cuda.is_available():
+            return requested
+        print("CUDA requested, but CUDA is unavailable. Falling back to CPU.")
+        return "cpu"
+    if req == "mps":
+        if torch.backends.mps.is_available():
+            return "mps"
+        print("MPS requested, but MPS is unavailable. Falling back to CPU.")
+        return "cpu"
+    if req == "cpu":
+        return "cpu"
+    return requested
 
 
 class SoundPlayer:
@@ -188,6 +218,7 @@ class PopupWarning:
 
 def main():
     args = parse_args()
+    device = resolve_device(args.device)
     # Load the pose model and webcam stream
     model = YOLO("yolo26s-pose.pt")
     cap = cv2.VideoCapture(0)
@@ -215,7 +246,7 @@ def main():
             if not ok:
                 break
 
-            r = model(frame, verbose=False)[0]
+            r = model(frame, verbose=False, device=device)[0]
             vis = r.plot()
             msg = "No person detected"
             color = (255, 255, 255)
